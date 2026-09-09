@@ -638,6 +638,32 @@ function explainKnownLegacyImportError(err: StructuredLegacyImportError): string
       "Fix the source markdown (restore or correct the missing PLAN) and retry gsd recover.",
     ].join("\n");
   }
+  if (err.code === "LEGACY_IMPORT_BACKUP_FOREIGN_KEY_FAILED") {
+    const violations = Array.isArray(err.context?.violations)
+      ? err.context.violations as ReadonlyArray<Record<string, unknown>>
+      : null;
+    if (!violations) return null;
+    const totalCount = typeof err.context?.violation_count === "number" ? err.context.violation_count : violations.length;
+    const byTable = new Map<string, number>();
+    for (const v of violations) {
+      const table = String(v.table ?? "?");
+      byTable.set(table, (byTable.get(table) ?? 0) + 1);
+    }
+    return [
+      `The database has ${totalCount} row(s) whose foreign keys point at missing parent rows — recover refuses to`,
+      "build a backup from a database that already fails referential integrity.",
+      "",
+      "By table:",
+      ...[...byTable.entries()].map(([table, count]) => `  ${table}: ${count} row(s)`),
+      "",
+      "Sample violations (table, rowid, missing parent table):",
+      ...violations.slice(0, 10).map((v) => `  ${v.table} rowid=${v.rowid} -> missing ${v.parent}`),
+      "",
+      "This usually means old rows still reference a milestone/slice/task id that no longer exists",
+      "(for example, a leftover row from before a unique-milestone-id rename). Find and either delete",
+      "or repoint those rows to the current id, then retry gsd recover.",
+    ].join("\n");
+  }
   return null;
 }
 
