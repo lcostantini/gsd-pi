@@ -17,6 +17,7 @@ import {
 import { LegacyImportPreviewError } from "../legacy-import-preview.ts";
 import { LegacyImportSourceError } from "../legacy-import-preview-source.ts";
 import { LegacyImportClassificationError } from "../legacy-import-preview-classifier.ts";
+import { LegacyImportBackupError } from "../legacy-import-backup.ts";
 
 describe("isStructuredLegacyImportError", () => {
   test("recognizes any LegacyImport*Error carrying code/context/evidence", () => {
@@ -117,6 +118,22 @@ describe("formatLegacyImportError", () => {
     const baseline = formatLegacyImportErrorBaseline(err);
     assert.match(message, /no PLAN establishes it as a real slice\/task/);
     assert.match(message, /M009-rfuh2h\/S02, task T01/);
+    assert.ok(message.endsWith(baseline), "baseline must be appended verbatim, not replaced");
+  });
+
+  test("a foreign-key violation error prepends its explanation above the same baseline every other error gets", () => {
+    const violations = [{ table: "quality_gates", rowid: 7, parent: "milestones", fkid: 0 }];
+    const err = new LegacyImportBackupError(
+      "LEGACY_IMPORT_BACKUP_FOREIGN_KEY_FAILED",
+      "legacy import backup contains foreign-key violations",
+      { violation_count: 1, violations },
+      "verification",
+      false,
+    );
+    const message = formatLegacyImportError(err);
+    const baseline = formatLegacyImportErrorBaseline(err);
+    assert.match(message, /row\(s\) whose foreign keys point at missing parent rows/);
+    assert.match(message, /quality_gates: 1 row\(s\)/);
     assert.ok(message.endsWith(baseline), "baseline must be appended verbatim, not replaced");
   });
 });
