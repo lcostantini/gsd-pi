@@ -602,7 +602,30 @@ export function formatLegacyImportErrorBaseline(err: StructuredLegacyImportError
  * it only adds a paragraph on top of the same facts every error already
  * gets.
  */
-function explainKnownLegacyImportError(_err: StructuredLegacyImportError): string | null {
+function explainKnownLegacyImportError(err: StructuredLegacyImportError): string | null {
+  if (err.code === "LEGACY_IMPORT_CLASSIFICATION_LIFECYCLE_AUTHORITY_INVALID") {
+    const targetKey = typeof err.context?.target_key === "string" ? err.context.target_key : undefined;
+    if (!targetKey) return null;
+    const parts = targetKey.split("/");
+    const [milestoneId, sliceId, taskId] = parts;
+    const scopeLine = taskId !== undefined
+      ? `${milestoneId}/${sliceId}, task ${taskId}`
+      : sliceId !== undefined
+        ? `${milestoneId}, slice ${sliceId}`
+        : targetKey;
+    return [
+      `A markdown artifact references ${scopeLine}, but no PLAN establishes it as a real slice/task.`,
+      "",
+      taskId !== undefined
+        ? `  Look for a ${sliceId}-T${taskId.replace(/^T/, "")}-SUMMARY.md (or similar) with no matching entry in the slice's own\n`
+          + `  NN-${sliceId.replace(/^S/, "").padStart(2, "0")}-PLAN.md — the PLAN file may be missing, or the task id inside it\n`
+          + `  doesn't match the SUMMARY's parent/task ids.`
+        : `  Look for a ROADMAP entry for ${scopeLine} with no matching PLAN file on disk, or a PLAN whose\n`
+          + `  milestone/slice id doesn't match what the ROADMAP declares.`,
+      "",
+      "Fix the source markdown (restore or correct the missing PLAN) and retry gsd recover.",
+    ].join("\n");
+  }
   return null;
 }
 
