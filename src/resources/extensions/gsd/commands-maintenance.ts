@@ -30,7 +30,6 @@ import {
   formatLegacyImportForwardRepairChoice,
   parseLegacyImportForwardRepairChoices,
 } from "./legacy-import-forward-repair-choice-token.js";
-import { LegacyImportBaseSnapshotError } from "./legacy-import-preview-base.js";
 import { LEGACY_IMPORT_RESTORE_ASSESSMENT_CONSENT_SCHEMA_VERSION, type LegacyImportRestoreAssessmentConsent } from "./legacy-import-restore-assessment.js";
 import {
   preserveProjectionChanges,
@@ -546,6 +545,80 @@ async function confirmRecover(
 }
 
 /**
+ * Structural shape shared by every LegacyImport*Error class in this
+ * subsystem (LegacyImportApplicationError, LegacyImportBackupError,
+ * LegacyImportBaseSnapshotError, LegacyImportClassificationError,
+ * LegacyImportPreviewError, LegacyImportDatabaseTargetError,
+ * LegacyImportPreviewDatabaseTargetError, LegacyImportSourceError,
+ * LegacyImportRecoveryActionError, and others), even though none of them
+ * share a common base class. Duck-typed on the fields that matter for a
+ * readable message rather than exact class identity, so every current and
+ * future error class gets the same baseline handling without another
+ * instanceof branch.
+ */
+export interface StructuredLegacyImportError {
+  name: string;
+  message: string;
+  code?: unknown;
+  stage?: unknown;
+  context?: Readonly<Record<string, unknown>>;
+  evidence?: Readonly<Record<string, unknown>>;
+}
+
+export function isStructuredLegacyImportError(err: unknown): err is StructuredLegacyImportError {
+  return (
+    err instanceof Error
+    && err.name.startsWith("LegacyImport")
+    && ("code" in err || "context" in err || "evidence" in err)
+  );
+}
+
+/**
+ * Baseline formatting every structured legacy-import error with: class name,
+ * stage, code, and the error's own context/evidence as readable key:value
+ * lines. The goal is to surface what the error itself already carries
+ * (structured, safe-to-show data), not internal file/line detail.
+ */
+export function formatLegacyImportErrorBaseline(err: StructuredLegacyImportError): string {
+  const details = err.evidence ?? err.context;
+  const lines = [
+    `[${err.name}]${typeof err.stage === "string" ? ` stage=${err.stage}` : ""}${typeof err.code === "string" ? ` code=${err.code}` : ""}`,
+  ];
+  if (details && Object.keys(details).length > 0) {
+    lines.push("Context:");
+    for (const [key, value] of Object.entries(details)) {
+      lines.push(`  ${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Optional plain-language explanation for legacy-import error codes worth
+ * translating into concrete, actionable prose ("look for this file",
+ * "here's the likely cause"). Returns null for every code without a known
+ * translation, in which case only the baseline above is shown; adding a
+ * translation for a new code never takes anything away from the baseline,
+ * it only adds a paragraph on top of the same facts every error already
+ * gets.
+ */
+function explainKnownLegacyImportError(_err: StructuredLegacyImportError): string | null {
+  return null;
+}
+
+/**
+ * Format a caught legacy-import error for the user: the baseline (always),
+ * with a plain-language explanation prepended when one exists for the code.
+ * Every LegacyImport*Error goes through this same path — there is no
+ * separate, lesser-quality branch for codes without a known explanation.
+ */
+export function formatLegacyImportError(err: StructuredLegacyImportError): string {
+  const baseline = formatLegacyImportErrorBaseline(err);
+  const explanation = explainKnownLegacyImportError(err);
+  return explanation ? `${explanation}\n\n${baseline}` : baseline;
+}
+
+/**
  * `gsd recover` — Explicitly import legacy markdown into canonical DB state.
  *
  * Applies one sealed Preview through the verified Import Application boundary,
@@ -693,13 +766,15 @@ export async function handleRecover(
     );
     ctx.ui.notify(lines.join("\n"), "success");
   } catch (err) {
+    if (isStructuredLegacyImportError(err)) {
+      const formatted = formatLegacyImportError(err);
+      logWarning("command", `recover failed: ${formatted.replace(/\n/g, " ")}`);
+      ctx.ui.notify(`gsd recover failed: ${err.message}\n\n${formatted}`, "error");
+      return;
+    }
     const message = err instanceof Error ? err.message : String(err);
-    const details = err instanceof LegacyImportBaseSnapshotError
-      ? ` [${err.code}] context=${JSON.stringify(err.context)}`
-      : "";
-    const msg = `${message}${details}`;
-    logWarning("command", `recover failed: ${msg}`);
-    ctx.ui.notify(`gsd recover failed: ${msg}`, "error");
+    logWarning("command", `recover failed: ${message}`);
+    ctx.ui.notify(`gsd recover failed: ${message}`, "error");
   }
 }
 
