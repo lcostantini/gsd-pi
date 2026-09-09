@@ -1198,7 +1198,7 @@ describe('gsd-recover', async () => {
       assert.deepEqual(canonicalRecoverSnapshot(), before);
       assert.deepEqual(recoverSourceSnapshot(base), sourceBefore);
       assert.equal(notes.at(-1)?.kind, 'error');
-      assert.match(notes.at(-1)?.message ?? '', /unresolved|requires.*user/i);
+      assert.match(notes.at(-1)?.message ?? '', /item\(s\) in the Preview need a decision/i);
     } finally {
       closeDatabase();
       cleanup(base);
