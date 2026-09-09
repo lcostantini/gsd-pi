@@ -1204,4 +1204,69 @@ describe('gsd-recover', async () => {
       cleanup(base);
     }
   });
+
+  test('handleRecover explains a missing PLAN behind an orphaned task SUMMARY', async () => {
+    // Regression: an orphaned SUMMARY (parent slice/task never registered via
+    // its own PLAN) throws LegacyImportClassificationError with code
+    // LEGACY_IMPORT_CLASSIFICATION_LIFECYCLE_AUTHORITY_INVALID and only
+    // target_key context -- handleRecover previously let this propagate as a
+    // bare, unexplained message ("legacy import canonical lifecycle has no
+    // hierarchy row"). It must now name the missing milestone/slice/task and
+    // point at the file to fix.
+    const base = createFixtureBase();
+    try {
+      writeFile(base, 'phases/09-team/09-ROADMAP.md', [
+        '# M009-rfuh2h: Team milestone',
+        '',
+        '- [ ] **S01: Recover generated artifacts** `risk:low` `depends:[]`',
+        '- [x] **S02: Orphaned slice with no PLAN** `risk:low` `depends:[]`',
+        '',
+      ].join('\n'));
+      writeFile(base, 'phases/09-team/09-01-PLAN.md', [
+        '# S01: Recover generated artifacts',
+        '',
+        '**Milestone:** M009-rfuh2h',
+        '**Slice:** S01',
+        '',
+        '<tasks>',
+        '- [ ] **T01**: Recover generated task',
+        '</tasks>',
+        '',
+      ].join('\n'));
+      writeFile(base, 'phases/09-team/S01-T01-SUMMARY.md', [
+        '---',
+        'id: T01',
+        'parent: S01',
+        'milestone: M009-rfuh2h',
+        '---',
+        '',
+        '# T01: Recover generated task',
+        '',
+      ].join('\n'));
+      // S02 has no 09-02-PLAN.md at all -- only its task SUMMARY survived.
+      writeFile(base, 'phases/09-team/S02-T01-SUMMARY.md', [
+        '---',
+        'id: T01',
+        'parent: S02',
+        'milestone: M009-rfuh2h',
+        '---',
+        '',
+        '# T01: Orphaned task',
+        '',
+      ].join('\n'));
+      openDatabase(join(base, '.gsd', 'gsd.db'));
+
+      const { ctx, notes } = makeCtx();
+      await handleRecover(ctx, base);
+
+      assert.equal(notes.at(-1)?.kind, 'error');
+      const message = notes.at(-1)?.message ?? '';
+      assert.match(message, /M009-rfuh2h/);
+      assert.match(message, /S02/);
+      assert.match(message, /no PLAN establishes it as a real slice\/task/);
+    } finally {
+      closeDatabase();
+      cleanup(base);
+    }
+  });
 });

@@ -16,6 +16,7 @@ import {
 } from "../commands-maintenance.ts";
 import { LegacyImportPreviewError } from "../legacy-import-preview.ts";
 import { LegacyImportSourceError } from "../legacy-import-preview-source.ts";
+import { LegacyImportClassificationError } from "../legacy-import-preview-classifier.ts";
 
 describe("isStructuredLegacyImportError", () => {
   test("recognizes any LegacyImport*Error carrying code/context/evidence", () => {
@@ -104,5 +105,18 @@ describe("formatLegacyImportError", () => {
     );
     const message = formatLegacyImportError(err);
     assert.equal(message, formatLegacyImportErrorBaseline(err));
+  });
+
+  test("a missing-PLAN lifecycle error prepends its explanation above the same baseline every other error gets", () => {
+    const err = new LegacyImportClassificationError(
+      "LEGACY_IMPORT_CLASSIFICATION_LIFECYCLE_AUTHORITY_INVALID",
+      "legacy import canonical lifecycle has no hierarchy row",
+      { target_key: "M009-rfuh2h/S02/T01" },
+    );
+    const message = formatLegacyImportError(err);
+    const baseline = formatLegacyImportErrorBaseline(err);
+    assert.match(message, /no PLAN establishes it as a real slice\/task/);
+    assert.match(message, /M009-rfuh2h\/S02, task T01/);
+    assert.ok(message.endsWith(baseline), "baseline must be appended verbatim, not replaced");
   });
 });
