@@ -771,7 +771,7 @@ describe('gsd-recover', async () => {
       assert.equal(notes.at(-1)?.kind, 'error');
       const message = notes.at(-1)?.message ?? '';
       assert.match(message, /LEGACY_IMPORT_BASE_ROW_DUPLICATE/);
-      assert.match(message, /"row_set":"decision_memories"/);
+      assert.match(message, /row_set: decision_memories/);
       assert.match(message, /source_decision_id/);
       assert.match(message, /D001/);
     } finally {
