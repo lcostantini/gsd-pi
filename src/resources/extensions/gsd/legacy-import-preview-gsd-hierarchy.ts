@@ -707,6 +707,8 @@ function emitHybridClaim(
       milestone_id: claim.canonicalId,
       status: slice.status,
       title: slice.title,
+      ...(slice.risk === undefined ? {} : { risk: slice.risk }),
+      ...(slice.dependsOn === undefined ? {} : { depends_on: slice.dependsOn }),
     }, reason, slice.span);
   }
 }
@@ -913,6 +915,8 @@ function emitFlatRoadmap(
       milestone_id: claim.canonicalId,
       status: slice.status,
       title: slice.title,
+      ...(slice.risk === undefined ? {} : { risk: slice.risk }),
+      ...(slice.dependsOn === undefined ? {} : { depends_on: slice.dependsOn }),
     }, "flat-slice-checklist", slice.span);
   }
 }
