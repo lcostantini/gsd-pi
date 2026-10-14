@@ -708,7 +708,7 @@ function emitHybridClaim(
       status: slice.status,
       title: slice.title,
       ...(slice.risk === undefined ? {} : { risk: slice.risk }),
-      ...(slice.dependsOn === undefined ? {} : { depends_on: slice.dependsOn }),
+      ...(slice.dependsOn === undefined || slice.dependsOn.length === 0 ? {} : { depends_on: slice.dependsOn }),
     }, reason, slice.span);
   }
 }
@@ -916,7 +916,7 @@ function emitFlatRoadmap(
       status: slice.status,
       title: slice.title,
       ...(slice.risk === undefined ? {} : { risk: slice.risk }),
-      ...(slice.dependsOn === undefined ? {} : { depends_on: slice.dependsOn }),
+      ...(slice.dependsOn === undefined || slice.dependsOn.length === 0 ? {} : { depends_on: slice.dependsOn }),
     }, "flat-slice-checklist", slice.span);
   }
 }
