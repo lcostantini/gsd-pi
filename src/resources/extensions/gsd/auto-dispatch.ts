@@ -105,7 +105,7 @@ import {
 } from "./verification-source-integrity.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
 import { readUnitBudget } from "./db/unit-dispatch-budgets.js";
-import { hasStoredPreExecutionRetry, readStoredCommitRepairRetry } from "./db/unit-dispatch-retries.js";
+import { hasStoredPreExecutionRetry, readStoredCommitRepairRetry, releaseCommitRepairRetry } from "./db/unit-dispatch-retries.js";
 import {
   grantMilestoneValidationWaiver,
   type MilestoneValidationWaiverReason,
@@ -619,6 +619,13 @@ export const DISPATCH_RULES: DispatchRule[] = [
     // rule sends the task back to the executor before the slice moves on. It
     // reads the database only, so a restart selects the same unit as a live
     // process.
+    //
+    // The retry is released when the task has since closed out successfully
+    // through another path (e.g. a later attempt completed and committed
+    // cleanly): without this check, a stale retry row permanently overrides
+    // every later dispatch decision for the slice, since this rule runs
+    // before state-derived dispatch and never re-checks whether its target
+    // task is still open.
     name: "stored retry → execute-task (commit repair)",
     match: async ({ state, mid, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (!state.activeSlice) return null;
@@ -626,6 +633,11 @@ export const DISPATCH_RULES: DispatchRule[] = [
       const retry = readStoredCommitRepairRetry(mid, sid);
       const tid = retry ? parseUnitId(retry.unitId).task : undefined;
       if (!retry || !tid) return null;
+      const lifecycleStatus = readTaskLifecycleStatus({ milestoneId: mid, sliceId: sid, taskId: tid });
+      if (lifecycleStatus === "completed" || lifecycleStatus === "cancelled" || lifecycleStatus === "blocker-accepted") {
+        releaseCommitRepairRetry("execute-task", retry.unitId);
+        return null;
+      }
       const terminalAbort = readExecuteTaskTerminalAbort(mid, sid, tid);
       if (terminalAbort) return terminalAbort;
       return {

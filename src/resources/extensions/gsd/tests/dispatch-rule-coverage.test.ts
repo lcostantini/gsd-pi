@@ -17,7 +17,9 @@ import type { DispatchContext, DispatchAction } from "../auto-dispatch.ts";
 import type { GSDState } from "../types.ts";
 import { createWorkspace, scopeMilestone } from "../workspace.ts";
 import { closeDatabase, insertArtifact, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
+import { _getAdapter } from "../db/engine.ts";
 import { storeUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { readStoredCommitRepairRetry } from "../db/unit-dispatch-retries.ts";
 import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
@@ -460,6 +462,95 @@ for (const { phase, activeTask } of [
     );
   });
 }
+
+/** Insert a modeled workflow_item_lifecycles row directly (bypassing the Domain Operation
+ *  layer, which is not needed for this read-only dispatch-rule test). */
+function insertModeledTaskLifecycle(
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+  lifecycleStatus: string,
+): void {
+  const db = _getAdapter();
+  if (!db) throw new Error("test DB adapter unavailable");
+  const projectId = String(
+    db.prepare("SELECT project_id FROM project_authority WHERE singleton = 1").get()?.["project_id"],
+  );
+  const operationId = `op-lifecycle-${milestoneId}-${sliceId}-${taskId}`;
+  db.prepare(`
+    INSERT INTO workflow_operations (
+      operation_id, project_id, operation_type, idempotency_key,
+      expected_revision, resulting_revision,
+      expected_authority_epoch, resulting_authority_epoch,
+      actor_type, actor_id, source_transport, request_hash, created_at
+    ) VALUES (?, ?, 'attempt.settle', ?, 0, 1, 0, 0, 'agent', 'test', 'test', ?, ?)
+  `).run(
+    operationId,
+    projectId,
+    `key-${operationId}`,
+    `hash-${operationId}`,
+    "2026-07-12T00:00:00.000Z",
+  );
+  db.prepare(`
+    INSERT INTO workflow_item_lifecycles (
+      lifecycle_id, project_id, item_kind, milestone_id, slice_id, task_id,
+      lifecycle_status, state_version, created_at, updated_at,
+      last_operation_id, last_project_revision, last_authority_epoch
+    ) VALUES (?, ?, 'task', ?, ?, ?, ?, 1, ?, ?, ?, 1, 0)
+  `).run(
+    `lc-${operationId}`,
+    projectId,
+    milestoneId,
+    sliceId,
+    taskId,
+    lifecycleStatus,
+    "2026-07-12T00:00:00.000Z",
+    "2026-07-12T00:00:00.000Z",
+    operationId,
+  );
+}
+
+test("dispatch-rule-coverage: a stored commit repair retry for a task the modeled lifecycle already closed is released, not redispatched", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-commit-repair-stale-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
+  writeSliceFile(tmp, "M001", "S01", "PLAN", "# Plan\n");
+  writeTaskPlan(tmp, "M001", "S01", "T01");
+  writeTaskPlan(tmp, "M001", "S01", "T02");
+  openProjectWithDispatch(t, tmp, "execute-task", "M001/S01/T01");
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "First Task", status: "complete" });
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Second Task", status: "pending" });
+  // The modeled lifecycle is the authority: a later attempt closed T01
+  // cleanly (its commit eventually succeeded), but the stale commit-repair
+  // retry from the earlier failed commit attempt was never released.
+  insertModeledTaskLifecycle("M001", "S01", "T01", "completed");
+  storeUnitRetry("execute-task", COMMIT_REPAIR_RETRY);
+
+  const match = await findFirstMatch({
+    ...makeCtx(tmp, makeState({
+      phase: "executing",
+      activeSlice: { id: "S01", title: "First Slice" },
+      activeTask: { id: "T02", title: "Second Task" },
+    })),
+    prefs: { reactive_execution: { enabled: false } } as DispatchContext["prefs"],
+  });
+
+  assert.notEqual(
+    match?.ruleName,
+    "stored retry \u2192 execute-task (commit repair)",
+    "a retry for an already-completed task must not override the live dispatch decision",
+  );
+  assert.equal(
+    match?.result.action === "dispatch" ? match.result.unitId : null,
+    "M001/S01/T02",
+    "state derivation's active task (T02) must be dispatched, not the stale T01 retry",
+  );
+  assert.equal(
+    readStoredCommitRepairRetry("M001", "S01"),
+    null,
+    "the stale retry for the now-completed task must be released, not left to recur forever",
+  );
+});
 
 test("dispatch-rule-coverage: a stored verification retry of the active task does not change the selection", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-task-retry-"));
