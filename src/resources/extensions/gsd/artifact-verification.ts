@@ -33,7 +33,7 @@ import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { loadAllCaptures, loadPendingCaptures } from "./captures.js";
 import { loadActiveOverrides } from "./overrides.js";
 import { proveMilestoneCloseout } from "./milestone-closeout-proof.js";
-import { readLatestTaskAttempt } from "./task-execution-domain-operation.js";
+import { readLatestTaskAttempt, type TaskExecutionAttemptSnapshot } from "./task-execution-domain-operation.js";
 import {
   readPendingTaskRecoveryContext,
   readTaskRecoveryAttemptIds,
@@ -44,17 +44,23 @@ import { readMilestoneValidationVerdict } from "./milestone-validation-verdict.j
 
 export type ExecuteTaskArtifactReadiness = "verify" | "route";
 
+/** The next actionable stage only when a settled Attempt has a Result (pure predicate; see reader below). */
+export function taskAttemptArtifactReadiness(
+  attempt: Pick<TaskExecutionAttemptSnapshot, "state" | "resultId" | "outcome" | "nextStage"> | null | undefined,
+): ExecuteTaskArtifactReadiness | null {
+  if (attempt?.state !== "settled" || !attempt.resultId) return null;
+  if (attempt.nextStage === "verify" && attempt.outcome === "succeeded") return "verify";
+  if (attempt.nextStage === "route") return "route";
+  return null;
+}
+
 /** Return the next actionable stage only when the latest Task Attempt has a Result. */
 export function readExecuteTaskArtifactReadiness(
   milestoneId: string,
   sliceId: string,
   taskId: string,
 ): ExecuteTaskArtifactReadiness | null {
-  const attempt = readLatestTaskAttempt({ milestoneId, sliceId, taskId });
-  if (attempt?.state !== "settled" || !attempt.resultId) return null;
-  if (attempt.nextStage === "verify" && attempt.outcome === "succeeded") return "verify";
-  if (attempt.nextStage === "route") return "route";
-  return null;
+  return taskAttemptArtifactReadiness(readLatestTaskAttempt({ milestoneId, sliceId, taskId }));
 }
 
 /**
@@ -79,8 +85,9 @@ export function readTerminalTaskRecoveryAbort(
   milestoneId: string,
   sliceId: string,
   taskId: string,
+  options?: { projectId?: string },
 ): { recoveryActionId: string } | null {
-  for (const attemptId of readTaskRecoveryAttemptIds({ milestoneId, sliceId, taskId })) {
+  for (const attemptId of readTaskRecoveryAttemptIds({ milestoneId, sliceId, taskId }, options)) {
     const route = readTaskRecoveryRoute(attemptId);
     if (!route || route.recoveryOwner !== "agent") continue;
     // The newest agent-owned route is authoritative: a non-abort action
@@ -124,6 +131,38 @@ export function resolveArtifactVerificationBase(unitId: string, base: string): s
 
 function hasCompleteProjectResearch(base: string): boolean {
   return getProjectResearchStatus(base).complete;
+}
+
+/**
+ * Milestone-level units whose markdown artifact is rendered by the unit's own
+ * save tool (ADR-046). On a milestone whose phase directory was never
+ * rendered, `resolveExpectedArtifactPath` resolves no file even though the
+ * unit carries a full database-row contract, so post-unit verification must
+ * not require a resolvable projection path before surfacing the verify-fail
+ * (#2827): a dropped verify-fail settles the unit "completed" with no rows
+ * and the second identical dispatch trips the completed-no-advance liveness
+ * wedge.
+ */
+export const LATE_RENDERED_MILESTONE_UNITS: ReadonlySet<string> = new Set([
+  "discuss-milestone",
+  "research-milestone",
+  "plan-milestone",
+]);
+
+/**
+ * The database-row contract failure for a unit owned by `missingUnitResult`,
+ * or null when the unit's result is recorded, the unit id is malformed, or
+ * the read fails. Read-only: callers render this into recovery context and
+ * must not re-open the database (the post-unit path already refreshed it).
+ */
+export function describeMissingUnitResult(unitType: string, unitId: string): string | null {
+  const { milestone: mid, slice: sid } = parseUnitId(unitId);
+  if (!mid) return null;
+  try {
+    return missingUnitResult(unitType, mid, sid, true);
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -45,9 +45,10 @@ import {
 import { TurnStatusTracker, type TurnStatusUi } from "../turn-status.js";
 import { applyProviderPayloadPolicy } from "../provider-payload-policy.js";
 
-import { checkToolCallLoop, configureToolCallLoopGuard, recordToolCallLoopMutation, resetToolCallLoopGuard } from "./tool-call-loop-guard.js";
+import { checkToolCallLoop, configureToolCallLoopGuard, noteLoopGuardModelResponse, recordToolCallLoopMutation, resetToolCallLoopGuard } from "./tool-call-loop-guard.js";
 import { MINIMAL_AUTO_BASE_TOOL_NAMES } from "./core-session-tools.js";
 import { maybePauseAutoForApprovalGate, resetPendingGatePauseGuard } from "./pending-gate-pause.js";
+import { maybeAbortAutoUnitForLoopGuard, resetLoopGuardAbortGuard } from "./loop-guard-abort.js";
 import { saveActivityLog } from "../activity-log.js";
 import { recordToolCall as safetyRecordToolCall, recordToolResult as safetyRecordToolResult, saveEvidenceToDisk } from "../safety/evidence-collector.js";
 import { parseUnitId } from "../unit-id.js";
@@ -1409,6 +1410,7 @@ export function registerHooks(
   pi.on("before_agent_start", async (event, ctx: ExtensionContext) => {
     clearAutoCompletionStopInProgress();
     resetPendingGatePauseGuard();
+    resetLoopGuardAbortGuard();
     applyMinimalGsdToolSurface(pi);
 
     // Wait for ecosystem loader to finish (no-op after first turn).
@@ -1501,6 +1503,7 @@ export function registerHooks(
     recordRetryableTurnAbort(event);
     resetToolCallLoopGuard();
     resetPendingGatePauseGuard();
+    resetLoopGuardAbortGuard();
     clearPendingModelRouting();
     await resetAskUserQuestionsTurnCache();
     const { handleAgentEnd } = await import("./agent-end-recovery.js");
@@ -1543,6 +1546,15 @@ export function registerHooks(
   // start so a unit transition mid-stream cannot relabel the in-flight
   // response, then attach it on the matching message_end.
   pi.on("message_start", async (event) => {
+    // Model-response boundary for the loop guard's escalation streak (#2877):
+    // a block can only escalate once the model has seen it, i.e. a new
+    // ASSISTANT response started after it fired. Tool-result messages also
+    // emit message_start (agent-loop sequential execution emits each result
+    // before preparing the next call), so they must not count — otherwise a
+    // single response's whole tool batch would escalate.
+    if ((event.message as { role?: unknown } | undefined)?.role === "assistant") {
+      noteLoopGuardModelResponse();
+    }
     captureAssistantRoutingStart(event.message, autoSession.currentUnitRouting, isAutoActive());
   });
 
@@ -1574,11 +1586,21 @@ export function registerHooks(
     }
   });
 
-  // Squash-merge quick-task branch back to the original branch after the
-  // agent turn completes (#2668). cleanupQuickBranch is a no-op when no
-  // quick-return state is pending, so this is safe to call on every turn.
-  pi.on("turn_end", async () => {
+  // Per-turn housekeeping: drop native milestone status source revisions so
+  // each turn re-reads them fresh.
+  pi.on("turn_end", () => {
     clearNativeMilestoneStatusSourceRevisions();
+  });
+
+  // Squash-merge quick-task branch back to the original branch after the
+  // agent run completes (#2668). cleanupQuickBranch is a no-op when no
+  // quick-return state is pending, so this is safe to call on every run.
+  // Keyed on agent_end, NOT turn_end (#2791): turn_end fires after every
+  // tool round inside one agent run, which merged and deleted the quick
+  // branch mid-task for providers that execute tools in the agent loop
+  // (e.g. openai-codex). agent_end brackets the whole run for every
+  // provider; headless quick tasks already resolve on the same signal.
+  pi.on("agent_end", async () => {
     try {
       const { cleanupQuickBranch } = await import("../quick.js");
       cleanupQuickBranch();
@@ -1800,7 +1822,27 @@ export function registerHooks(
         toolName,
         count: loopCheck.count,
       });
-      return { block: true, reason: formatLoopGuardBlockReason(loopCheck.reason) };
+      const formattedReason = formatLoopGuardBlockReason(loopCheck.reason);
+      const blockReasonText =
+        formattedReason ?? loopCheck.reason ?? "Tool-call loop guard blocked a repeated tool call.";
+      // #2877: a second consecutive block of the same tool means the model
+      // ignored the first explicit block (and the per-tool cap's worth of
+      // calls). Escalate to the sanctioned pause path — abort the turn and
+      // land the unit in the pause/repair state — instead of returning yet
+      // another error toolResult the model may keep retrying.
+      if (
+        loopCheck.escalate &&
+        await maybeAbortAutoUnitForLoopGuard(ctx, pi, toolName, blockReasonText, loopCheck.count)
+      ) {
+        return {
+          block: true,
+          reason:
+            `Auto-mode paused: this tool was blocked again after an explicit loop-guard block, ` +
+            `so the turn is aborted and the unit waits in the pause/repair state (/gsd auto resumes it). ` +
+            blockReasonText,
+        };
+      }
+      return { block: true, reason: formattedReason };
     }
 
     const deferredGateGuard = shouldBlockDeferredApprovalTool(
